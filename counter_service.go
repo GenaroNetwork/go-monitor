@@ -17,11 +17,6 @@ var _counterService *CounterService = nil
 type BlockRange struct {
 	from *big.Int
 	to   *big.Int
-	done chan struct{}
-}
-
-func (b *BlockRange) Done() {
-	close(b.done)
 }
 
 /********************/
@@ -35,15 +30,11 @@ type Counter struct {
 	toNum   *big.Int
 	updated chan struct{} // toNum updated, notify generator to generate new BlockRange
 
-	muRange   sync.Mutex
-	listRange []*BlockRange
-	created   chan struct{}
 }
 
 // generate BlockRange continuously, at the meanwhile allow the `toNum` to be updated
 func (c *Counter) start(ctx context.Context, chanToNum chan *big.Int) {
 	go c.consumeToNum(ctx)
-	go c.consumeBlockRange(ctx)
 	go func() {
 		for {
 			select {
@@ -90,14 +81,9 @@ func (c *Counter) genBlockRange(toNum *big.Int) {
 		}
 		mu := sync.Mutex{}
 		mu.Lock()
-		br := &BlockRange{from: c.fromNum, to: num, done: make(chan struct{})}
+		br := &BlockRange{from: c.fromNum, to: num}
 		c.ChanOut <- br
 		c.fromNum = num
-
-		c.muRange.Lock()
-		c.listRange = append(c.listRange, br)
-		c.muRange.Unlock()
-		c.created <- struct{}{}
 		if end {
 			break
 		}
@@ -118,37 +104,6 @@ func (c *Counter) consumeToNum(ctx context.Context) {
 			case <-c.updated:
 			case <-ctx.Done():
 				break
-			}
-		}
-	}
-}
-
-func (c *Counter) consumeBlockRange(ctx context.Context) {
-	var blockRange *BlockRange
-quit:
-	for {
-		c.muRange.Lock()
-		if blockRange != nil {
-			c.muRange.Unlock()
-			select {
-			case <-blockRange.done:
-				reply, err := c.redisCon.Do("SET", RedisKeyFromNum, blockRange.to.String())
-				fmt.Printf("redis set %v %v %v\n", reply, err, blockRange.to)
-				blockRange = nil
-			case <-c.created:
-			case <-ctx.Done():
-				break quit
-			}
-		} else if len(c.listRange) != 0 {
-			blockRange = c.listRange[0]
-			c.listRange = c.listRange[1:]
-			c.muRange.Unlock()
-		} else {
-			c.muRange.Unlock()
-			select {
-			case <-c.created:
-			case <-ctx.Done():
-				break quit
 			}
 		}
 	}
@@ -199,7 +154,6 @@ func (c *CounterService) Counter(ctx context.Context, redisCon redis.Conn, chanT
 		fromNum:  fromNum,
 		redisCon: redisCon,
 		updated:  make(chan struct{}),
-		created:  make(chan struct{}),
 		ChanOut:  make(chan *BlockRange),
 	}
 	counter.start(ctx, chanToNum)

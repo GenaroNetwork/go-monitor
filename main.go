@@ -1,13 +1,15 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"math/big"
+	"os"
+	"os/signal"
 
 	"github.com/gomodule/redigo/redis"
 	_ "github.com/lib/pq"
-	"golang.org/x/net/context"
 )
 
 const (
@@ -19,10 +21,10 @@ const (
 )
 
 const (
-	WsServer = "ws://47.100.34.71:8547"
+	WsServer = "ws://101.132.159.197:8547"
 )
 const (
-	RedisKeyFromNum = "m:b"
+	RedisKeyFromNum = "m:b" // monitor:block
 )
 
 var redisCon redis.Conn
@@ -46,37 +48,22 @@ func main() {
 	panicErr(err)
 	defer redisCon.Close()
 
+	// subscribe for new block
+	chanBlockNumber := make(chan *big.Int)
+	err = Subscribe(WsServer, chanBlockNumber)
+	panicErr(err)
+
 	// context
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// subscribe for new block
-	chanBlockNumber := make(chan *big.Int)
-	Subscribe(WsServer, chanBlockNumber)
-
-	// prepare Counter
-	counterService := NewCounterService()
-	counter, err := counterService.Counter(ctx, redisCon, chanBlockNumber)
+	taskManager := NewTaskManager()
+	err = taskManager.Run(ctx, chanBlockNumber)
 	panicErr(err)
 
-	// prepare QueryClient
-	client, err := NewQueryClient(WsServer)
-	panicErr(err)
-
-	// start query service
-	ctxQueryClient := context.WithValue(ctx, "client", client)
-	queryService := NewQueryService(1)
-	go queryService.Start(ctxQueryClient)
-
-	// start save service
-	saveService := NewSaveService(100)
-	go saveService.Start(ctx)
-
-	for br := range counter.ChanOut {
-		queryWorker := <-queryService.Workers
-		queryWorker.ChanIn <- br
-		saveService.ChanIn <- queryWorker.ChanOut
-	}
+	exit := make(chan os.Signal)
+	signal.Notify(exit, os.Interrupt, os.Kill)
+	<-exit
 
 	// shareTxInfo
 	//shareTxInfo, err := client.QueryShareTxInfo(big.NewInt(200000), big.NewInt(286400))

@@ -3,14 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"sync"
 )
 
 type QueryData struct {
 	TrafficTxInfoList []TrafficTxInfo
 	BucketTxInfoList  []BucketTxInfo
 	SuppTxInfoList    []SuppTxInfo
-	blockRange        *BlockRange
 }
 
 func (q *QueryData) IsEmpty() bool {
@@ -18,101 +16,75 @@ func (q *QueryData) IsEmpty() bool {
 }
 
 type QueryWorker struct {
-	ChanIn  chan *BlockRange
-	ChanOut chan QueryData
-	Done    chan *QueryWorker
+	ChanIn chan *Task
+	Done   chan *QueryWorker
 }
 
 func NewQueryWorker(ch chan *QueryWorker) QueryWorker {
 	return QueryWorker{
-		ChanIn:  make(chan *BlockRange),
-		ChanOut: make(chan QueryData),
-		Done:    ch,
+		ChanIn: make(chan *Task),
+		Done:   ch,
 	}
 }
 
 func (w *QueryWorker) Run(ctx context.Context) {
-	for blockRange := range w.ChanIn {
-		fmt.Printf("query worker range: %v %v\n", blockRange.from, blockRange.to)
-		w.queryInRange(ctx, blockRange)
+	for task := range w.ChanIn {
+		for {
+			fmt.Printf("query worker range: %v %v\n", task.blockRange.from, task.blockRange.to)
+			err := w.queryInRange(ctx, task)
+			if err == nil {
+				break
+			}
+			if err == context.Canceled {
+				return
+			}
+		}
 	}
 }
 
-func (w *QueryWorker) queryInRange(ctx context.Context, blockRange *BlockRange) {
-	var wg sync.WaitGroup
+func (w *QueryWorker) queryInRange(ctx context.Context, task *Task) error {
+	client, err := NewQueryClient(WsServer)
+	if err != nil {
+		fmt.Println("client e", err)
+		return err
+	}
 
-	client, _ := ctx.Value("client").(*QueryClient)
-	queryData := QueryData{blockRange: blockRange}
-	from := blockRange.from
-	to := blockRange.to
+	queryData := QueryData{}
+	from := task.blockRange.from
+	to := task.blockRange.to
+
 	// trafficTxInfo
-	go func() {
-		wg.Add(1)
-		for {
-			if ctx.Err() == context.Canceled {
-				break
-			}
-			trafficTxInfoList, err := client.QueryTrafficTxInfo(ctx, from, to)
-			if err != nil {
-				fmt.Printf("QueryTrafficTxInfo err: %v\n", err)
-				continue
-			}
-			queryData.TrafficTxInfoList = trafficTxInfoList
-			break
-		}
-		wg.Done()
-
-	}()
+	trafficTxInfoList, err := client.QueryTrafficTxInfo(ctx, from, to)
+	if err != nil {
+		fmt.Printf("QueryTrafficTxInfo err: %v\n", err)
+		return err
+	}
+	queryData.TrafficTxInfoList = trafficTxInfoList
 
 	// bucketTxInfo
-	go func() {
-		wg.Add(1)
-		for {
-			if ctx.Err() == context.Canceled {
-				break
-			}
-			bucketTxInfoList, err := client.QueryBucketTxInfo(ctx, from, to)
-			if err != nil {
-				fmt.Printf("err: %v\n", err)
-				continue
-			}
-			queryData.BucketTxInfoList = bucketTxInfoList
-			break
-		}
-		wg.Done()
-	}()
+	bucketTxInfoList, err := client.QueryBucketTxInfo(ctx, from, to)
+	if err != nil {
+		fmt.Printf("QueryBucketTxInfo err: %v\n", err)
+		return err
+	}
+	queryData.BucketTxInfoList = bucketTxInfoList
 
 	// suppTxInfo
-	go func() {
-		wg.Add(1)
-		for {
-			if ctx.Err() == context.Canceled {
-				break
-			}
-			suppTxInfoList, err := client.QuerySuppTxInfo(ctx, from, to)
-			if err != nil {
-				fmt.Printf("err: %v\n", err)
-				continue
-			}
-			queryData.SuppTxInfoList = suppTxInfoList
-			break
-		}
-		wg.Done()
-	}()
-
-	finished := make(chan struct{})
-	go func() {
-		wg.Wait()
-		finished <- struct{}{}
-	}()
-	select {
-	case <-ctx.Done():
-	case <-finished:
-		fmt.Printf("queried %v %v\n", queryData.blockRange.from, queryData.blockRange.to)
-		w.ChanOut <- queryData
-		w.Done <- w
+	suppTxInfoList, err := client.QuerySuppTxInfo(ctx, from, to)
+	if err != nil {
+		fmt.Printf("QuerySuppTxInfo err: %v\n", err)
+		return err
 	}
+	queryData.SuppTxInfoList = suppTxInfoList
+
+	fmt.Printf("queried %v %v\n", task.blockRange.from, task.blockRange.to)
+	task.queryData = &queryData
+	task.DoneQuery()
+	w.Done <- w
+	return nil
 }
+
+/*****************************/
 
 type QueryService struct {
 	count   uint
