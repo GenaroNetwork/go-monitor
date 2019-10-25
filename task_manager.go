@@ -16,10 +16,10 @@ func NewTaskManager() TaskManager {
 	return TaskManager{}
 }
 
-func (t *TaskManager) Run(ctx context.Context, chanBlockNumber chan *big.Int) error {
+func (t *TaskManager) Run(ctx context.Context, cHeadNum chan *big.Int) error {
 	// prepare Counter
 	counterService := NewCounterService()
-	counter, err := counterService.Counter(ctx, redisCon, chanBlockNumber)
+	counter, err := counterService.Counter(ctx, redisCon, cHeadNum)
 	if err != nil {
 		return err
 	}
@@ -46,7 +46,7 @@ func (t *TaskManager) Run(ctx context.Context, chanBlockNumber chan *big.Int) er
 	quit:
 		for {
 			select {
-			case blockRange := <-counter.ChanOut:
+			case blockRange := <-counter.cRange:
 				task := &Task{
 					blockRange: blockRange,
 					doneQuery:  make(chan struct{}),
@@ -66,7 +66,7 @@ func (t *TaskManager) Run(ctx context.Context, chanBlockNumber chan *big.Int) er
 				select {
 				case worker := <-queryService.Workers:
 					select {
-					case worker.ChanIn <- task:
+					case worker.cTask <- task:
 					case <-ctx.Done():
 						fmt.Println("canceled while dispatch task")
 						break quit
@@ -92,15 +92,19 @@ func (t *TaskManager) Run(ctx context.Context, chanBlockNumber chan *big.Int) er
 				task := t.tasks[0]
 				select {
 				case <-task.doneQuery:
+					fmt.Printf("doneQuery %v %v\n", task.blockRange.from, task.blockRange.to)
 					saveService.ChanIn <- task
 					select {
 					case <-task.doneSave:
+						fmt.Printf("doneSave %v %v\n", task.blockRange.from, task.blockRange.to)
 						t.mu.Lock()
 						t.tasks = t.tasks[1:]
 						t.mu.Unlock()
 						_, err := redisCon.Do("SET", RedisKeyFromNum, task.blockRange.to.String())
 						if err != nil {
-							fmt.Printf("save redis failed %v %v", task.blockRange.from, task.blockRange.to)
+							fmt.Printf("save into redis failed %v %v\n", task.blockRange.from, task.blockRange.to)
+						} else {
+							fmt.Printf("saved into redis %v %v\n", task.blockRange.from, task.blockRange.to)
 						}
 					case <-ctx.Done():
 						fmt.Println("canceled while waiting for doneSave")

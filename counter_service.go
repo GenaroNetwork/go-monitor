@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"math/big"
 	"sync"
 
@@ -22,91 +20,63 @@ type BlockRange struct {
 /********************/
 
 type Counter struct {
-	fromNum  *big.Int
-	ChanOut  chan *BlockRange
+	headNum  *big.Int
+	cRange   chan *BlockRange
 	redisCon redis.Conn
-
-	muToNum sync.Mutex
-	toNum   *big.Int
-	updated chan struct{} // toNum updated, notify generator to generate new BlockRange
-
 }
 
-// generate BlockRange continuously, at the meanwhile allow the `toNum` to be updated
-func (c *Counter) start(ctx context.Context, chanToNum chan *big.Int) {
-	go c.consumeToNum(ctx)
+// generate BlockRange continuously, at the meanwhile allow the `newHeadNum` to be updated
+func (c *Counter) start(ctx context.Context, cHeadNum chan *big.Int) {
+	mu := sync.Mutex{}
+	updateEvent := make(chan struct{})
+	var newHeadNum *big.Int
 	go func() {
 		for {
 			select {
-			case toNum := <-chanToNum:
-				err := c.updateToNum(toNum)
-				if err != nil {
-					fmt.Printf("updateToNum error msg=%v\n", err)
+			case headNum := <-cHeadNum:
+				mu.Lock()
+				if newHeadNum == nil {
+					newHeadNum = headNum
+				} else if headNum.Cmp(newHeadNum) > 0 {
+					newHeadNum = headNum
+				}
+				mu.Unlock()
+				select {
+				case updateEvent <- struct{}{}:
+				default:
 				}
 			case <-ctx.Done():
 				break
 			}
 		}
 	}()
-}
-
-func (c *Counter) updateToNum(toNum *big.Int) error {
-	c.muToNum.Lock()
-	defer c.muToNum.Unlock()
-	// unexpected result, should be paid attention to,
-	// but might not be an error in some rare corner situation
-	// TODO: potential error
-	if c.fromNum.Cmp(toNum) > 0 {
-		return errors.New("Counter.fromNum > toNum")
-	}
-	if c.toNum != nil && c.toNum.Cmp(toNum) <= 0 {
-		return errors.New("Counter.toNum <= toNum")
-	}
-	c.toNum = toNum
-	fmt.Printf("updating toNum %v\n", toNum)
-	c.updated <- struct{}{}
-	fmt.Printf("updated toNum %v\n", toNum)
-	return nil
-}
-
-// generate a series of BlockRange in between [fromNum, toNum],
-// for each span of BlockRange, span <= MaxBlockRangeSpan <= 86400.
-func (c *Counter) genBlockRange(toNum *big.Int) {
-	end := false
-	for {
-		num := new(big.Int).Add(c.fromNum, big.NewInt(MaxBlockRangeSpan))
-		if num.Cmp(toNum) > 0 {
-			num = toNum
-			end = true
-		}
-		mu := sync.Mutex{}
-		mu.Lock()
-		br := &BlockRange{from: c.fromNum, to: num}
-		c.ChanOut <- br
-		c.fromNum = num
-		if end {
-			break
-		}
-	}
-}
-
-func (c *Counter) consumeToNum(ctx context.Context) {
-	for {
-		c.muToNum.Lock()
-		if c.toNum != nil {
-			toNum := c.toNum
-			c.toNum = nil
-			c.muToNum.Unlock()
-			c.genBlockRange(toNum)
-		} else {
-			c.muToNum.Unlock()
-			select {
-			case <-c.updated:
-			case <-ctx.Done():
-				break
+	go func() {
+	loop:
+		for {
+			mu.Lock()
+			if newHeadNum == nil || newHeadNum.Cmp(c.headNum) <= 0 {
+				mu.Unlock()
+				select {
+				case <-updateEvent:
+					continue
+				case <-ctx.Done():
+					break loop
+				}
 			}
+			num := new(big.Int).Add(c.headNum, big.NewInt(MaxBlockRangeSpan))
+			if num.Cmp(newHeadNum) > 0 {
+				num = newHeadNum
+			}
+			mu.Unlock()
+			br := &BlockRange{from: c.headNum, to: num}
+			select {
+			case c.cRange <- br:
+			case <-ctx.Done():
+				break loop
+			}
+			c.headNum = num
 		}
-	}
+	}()
 }
 
 /********************/
@@ -125,7 +95,7 @@ func NewCounterService() *CounterService {
 }
 
 // Lazily create a Counter in singleton pattern
-func (c *CounterService) Counter(ctx context.Context, redisCon redis.Conn, chanToNum chan *big.Int) (*Counter, error) {
+func (c *CounterService) Counter(ctx context.Context, redisCon redis.Conn, cHeadNum chan *big.Int) (*Counter, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.counter != nil {
@@ -140,22 +110,21 @@ func (c *CounterService) Counter(ctx context.Context, redisCon redis.Conn, chanT
 		return nil, err
 	}
 
-	var fromNum *big.Int
+	var oldHeadNum *big.Int
 	if ok {
-		fromNum, ok = new(big.Int).SetString(fromNumTxt, 10)
+		oldHeadNum, ok = new(big.Int).SetString(fromNumTxt, 10)
 	}
 
 	if ok == false {
 		// TODO: event: redis data corrupted, restart from `0`
-		fromNum = big.NewInt(0)
+		oldHeadNum = big.NewInt(0)
 	}
 
 	counter := Counter{
-		fromNum:  fromNum,
+		headNum:  oldHeadNum,
 		redisCon: redisCon,
-		updated:  make(chan struct{}),
-		ChanOut:  make(chan *BlockRange),
+		cRange:   make(chan *BlockRange),
 	}
-	counter.start(ctx, chanToNum)
+	counter.start(ctx, cHeadNum)
 	return &counter, nil
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 type QueryData struct {
@@ -16,22 +17,21 @@ func (q *QueryData) IsEmpty() bool {
 }
 
 type QueryWorker struct {
-	ChanIn chan *Task
-	Done   chan *QueryWorker
+	cTask chan *Task
+	Done  chan *QueryWorker
 }
 
 func NewQueryWorker(ch chan *QueryWorker) QueryWorker {
 	return QueryWorker{
-		ChanIn: make(chan *Task),
-		Done:   ch,
+		cTask: make(chan *Task),
+		Done:  ch,
 	}
 }
 
 func (w *QueryWorker) Run(ctx context.Context) {
-	for task := range w.ChanIn {
+	for task := range w.cTask {
 		for {
-			fmt.Printf("query worker range: %v %v\n", task.blockRange.from, task.blockRange.to)
-			err := w.queryInRange(ctx, task)
+			err := w.queryByTask(ctx, task)
 			if err == nil {
 				break
 			}
@@ -42,10 +42,13 @@ func (w *QueryWorker) Run(ctx context.Context) {
 	}
 }
 
-func (w *QueryWorker) queryInRange(ctx context.Context, task *Task) error {
+func (w *QueryWorker) queryByTask(ctx context.Context, task *Task) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Second*5)
+	defer cancel()
 	client, err := NewQueryClient(WsServer)
+	defer client.Close()
 	if err != nil {
-		fmt.Println("client e", err)
+		fmt.Println("client err", err)
 		return err
 	}
 

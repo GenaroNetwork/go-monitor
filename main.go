@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"os"
 	"os/signal"
+	"time"
 
 	"github.com/gomodule/redigo/redis"
 	_ "github.com/lib/pq"
@@ -49,8 +50,8 @@ func main() {
 	defer redisCon.Close()
 
 	// subscribe for new block
-	chanBlockNumber := make(chan *big.Int)
-	err = Subscribe(WsServer, chanBlockNumber)
+	cHeadNum := make(chan *big.Int, 1)
+	err = Subscribe(WsServer, cHeadNum)
 	panicErr(err)
 
 	// context
@@ -58,12 +59,14 @@ func main() {
 	defer cancel()
 
 	taskManager := NewTaskManager()
-	err = taskManager.Run(ctx, chanBlockNumber)
+	err = taskManager.Run(ctx, cHeadNum)
 	panicErr(err)
 
 	exit := make(chan os.Signal)
 	signal.Notify(exit, os.Interrupt, os.Kill)
 	<-exit
+	cancel()
+	time.Sleep(time.Second * 5)
 
 	// shareTxInfo
 	//shareTxInfo, err := client.QueryShareTxInfo(big.NewInt(200000), big.NewInt(286400))
