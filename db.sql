@@ -15,8 +15,8 @@ create table buckets
     uid        char(42) not null
 );
 
-create table settings
+create table if not exists settings
 (
-    id serial,
-    head_block bigint not null default 0,
+    id serial primary key,
+    head_num text
 );

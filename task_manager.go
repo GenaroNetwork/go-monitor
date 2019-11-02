@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math/big"
 	"sync"
@@ -16,10 +17,10 @@ func NewTaskManager() TaskManager {
 	return TaskManager{}
 }
 
-func (t *TaskManager) Run(ctx context.Context, cHeadNum chan *big.Int) error {
+func (t *TaskManager) Run(ctx context.Context, cHeadNum chan *big.Int, pgCon *sql.DB) error {
 	// prepare Counter
 	counterService := NewCounterService()
-	counter, err := counterService.Counter(ctx, redisCon, cHeadNum)
+	counter, err := counterService.Counter(ctx, pgCon, cHeadNum)
 	if err != nil {
 		return err
 	}
@@ -31,11 +32,11 @@ func (t *TaskManager) Run(ctx context.Context, cHeadNum chan *big.Int) error {
 	}
 
 	// start query service
-	queryService := NewQueryService(3)
+	queryService := NewQueryService(5)
 	go queryService.Start(ctx)
 
 	// start save service
-	saveService := NewSaveService(1)
+	saveService := NewSaveService(pgCon, 1)
 	go saveService.Start(ctx)
 
 	eventNonEmpty := make(chan struct{})
@@ -100,12 +101,6 @@ func (t *TaskManager) Run(ctx context.Context, cHeadNum chan *big.Int) error {
 						t.mu.Lock()
 						t.tasks = t.tasks[1:]
 						t.mu.Unlock()
-						_, err := redisCon.Do("SET", RedisKeyFromNum, task.blockRange.to.String())
-						if err != nil {
-							fmt.Printf("save into redis failed %v %v\n", task.blockRange.from, task.blockRange.to)
-						} else {
-							fmt.Printf("saved into redis %v %v\n", task.blockRange.from, task.blockRange.to)
-						}
 					case <-ctx.Done():
 						fmt.Println("canceled while waiting for doneSave")
 						break quit

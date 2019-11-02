@@ -9,7 +9,6 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/gomodule/redigo/redis"
 	_ "github.com/lib/pq"
 )
 
@@ -24,14 +23,15 @@ const (
 const (
 	WsServer = "ws://101.132.159.197:8547"
 )
-const (
-	RedisKeyFromNum = "m:b" // monitor:block
-)
 
-var redisCon redis.Conn
-var pgCon *sql.DB
+//const (
+//	RedisKeyFromNum = "m:b" // monitor:block
+//)
+
+//var redisCon redis.Conn
 
 func main() {
+	var pgCon *sql.DB
 	var err error
 	// connect to db
 	dbInfo := fmt.Sprintf(
@@ -45,9 +45,9 @@ func main() {
 	panicErr(err)
 
 	// connect to redis
-	redisCon, err = redis.Dial("tcp", "localhost:6379")
-	panicErr(err)
-	defer redisCon.Close()
+	//redisCon, err = redis.Dial("tcp", "localhost:6379")
+	//panicErr(err)
+	//defer redisCon.Close()
 
 	// subscribe for new block
 	cHeadNum := make(chan *big.Int, 1)
@@ -59,7 +59,7 @@ func main() {
 	defer cancel()
 
 	taskManager := NewTaskManager()
-	err = taskManager.Run(ctx, cHeadNum)
+	err = taskManager.Run(ctx, cHeadNum, pgCon)
 	panicErr(err)
 
 	exit := make(chan os.Signal)

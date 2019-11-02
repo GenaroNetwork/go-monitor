@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"math/big"
 	"sync"
 
@@ -95,35 +97,38 @@ func NewCounterService() *CounterService {
 }
 
 // Lazily create a Counter in singleton pattern
-func (c *CounterService) Counter(ctx context.Context, redisCon redis.Conn, cHeadNum chan *big.Int) (*Counter, error) {
+func (c *CounterService) Counter(ctx context.Context, pgCon *sql.DB, cHeadNum chan *big.Int) (*Counter, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.counter != nil {
 		return c.counter, nil
 	}
-
-	ok := true
-	fromNumTxt, err := redis.String(redisCon.Do("GET", RedisKeyFromNum))
-	if err == redis.ErrNil {
-		ok = false
-	} else if err != nil {
+	rows, err := pgCon.Query("select head_num from settings where id=1")
+	if err != nil {
 		return nil, err
 	}
 
-	var oldHeadNum *big.Int
-	if ok {
-		oldHeadNum, ok = new(big.Int).SetString(fromNumTxt, 10)
-	}
+	var headNum *big.Int
+	if rows.Next() {
+		var headNumStr string
+		err = rows.Scan(&headNumStr)
+		if err != nil {
+			return nil, err
+		}
 
-	if ok == false {
-		// TODO: event: redis data corrupted, restart from `0`
-		oldHeadNum = big.NewInt(0)
+		var ok bool
+		headNum, ok = new(big.Int).SetString(headNumStr, 10)
+
+		if ok == false {
+			return nil, errors.New("parsed db field head_num failed")
+		}
+	} else {
+		headNum = big.NewInt(0)
 	}
 
 	counter := Counter{
-		headNum:  oldHeadNum,
-		redisCon: redisCon,
-		cRange:   make(chan *BlockRange),
+		headNum: headNum,
+		cRange:  make(chan *BlockRange),
 	}
 	counter.start(ctx, cHeadNum)
 	return &counter, nil

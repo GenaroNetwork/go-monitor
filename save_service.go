@@ -4,15 +4,19 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/big"
+	"time"
 )
 
 type SaveService struct {
 	ChanIn chan *Task
+	pgCon  *sql.DB
 }
 
-func NewSaveService(cache uint) SaveService {
+func NewSaveService(pgCon *sql.DB, cache uint) SaveService {
 	return SaveService{
 		ChanIn: make(chan *Task, cache),
+		pgCon:  pgCon,
 	}
 }
 
@@ -26,28 +30,48 @@ func (s *SaveService) Start(ctx context.Context) {
 		}
 		for {
 			// TODO: fix context
-			ok := s.Save(ctx, queryData)
+			ok := s.Save(ctx, task.blockRange.to, queryData)
 			if ok {
 				task.DoneSave()
 				fmt.Printf("done %v %v\n", task.blockRange.from, task.blockRange.to)
 				break
 			} else {
 				fmt.Println("save to database failed")
+				time.Sleep(time.Millisecond * 100)
 			}
 		}
 	}
 }
 
-func (s *SaveService) Save(ctx context.Context, queryData *QueryData) bool {
+func (s *SaveService) Save(ctx context.Context, headNum *big.Int, queryData *QueryData) bool {
 	var tx *sql.Tx
 	var err error
 	var rows *sql.Rows
 
-	tx, err = pgCon.BeginTx(ctx, nil)
+	tx, err = s.pgCon.BeginTx(ctx, nil)
 	if err != nil {
 		fmt.Printf("sql.BeginTx err: %v\n", err)
 		return false
 	}
+
+	var headNumStmt *sql.Stmt
+	headNumStmt, err = tx.Prepare("insert into settings (id, head_num) values (1, $1) on conflict(id) do update set head_num=$1")
+	if err != nil {
+		fmt.Printf("sql.Prepare headNumStmt err: %v\n", err)
+		return false
+	}
+	defer headNumStmt.Close()
+	rows, err = headNumStmt.Query(headNum.String())
+	if err != nil {
+		fmt.Printf("update head_num failed %v err=%v\n", headNum, err)
+		return false
+	}
+	if rows.Next() {
+		var num string
+		err = rows.Scan(&num)
+		fmt.Printf("upsert head_num num=%v err=%v\n", num, err)
+	}
+	rows.Close()
 
 	var trafficStmt *sql.Stmt
 	trafficStmt, err = tx.Prepare("insert into users (id) values ($1) on conflict (id) do update set traffic=$2")
